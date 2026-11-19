@@ -587,6 +587,8 @@ ImFont* Urbanist;
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("AimKill Send"), &Vars.AimKillSend)) gFltShow[FLTBTN_AIMKILL] = Vars.AimKillSend;
                         if (ImGui::Checkbox(oxorany("AimKill 360"), &Vars.AimKill360)) gFltShow[FLTBTN_AIMKILL360] = Vars.AimKill360;
+                        ImGui::SliderInt(oxorany("Kill Count"), &Vars.AimKillMax, 1, 8);
+                        ImGui::SliderInt(oxorany("Kill Damage"), &Vars.AimKillDmg, 100, 100000);
                         ImGui::Text("Aik: st:%d n:%d s:%d c:%d", aikDbgSt, aikDbgN, aikDbgSent, aikDbgC); // st9=sent, st11=AikInit, st12-15=strike gates, s>0=packets, c: cover always 0 (removed)
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("Button Stop Time"), &Vars.StopTime)) gFltShow[FLTBTN_STOPTIME] = Vars.StopTime; // own option (user: bouhdo)
@@ -694,18 +696,8 @@ ImFont* Urbanist;
             RunGhost();
             RunMarkTP();
             RunTelekill();
-            StartAimkill();
+            StartAimkill(); // quad burst: scans once, strikes N targets, syncs 108 once
             RunResetGuest(); // Reset Guest config (login/lobby — runs always)
-            // zexisyy: msg 108 (reload) — same frame as Aimkill, after local+enemy
-            // (finder gated too: ma ndirouch raycast/finder f l'entry/lobby)
-            if (Vars.AimKillSend)
-            {
-                void *aikM108 = game_sdk->Curent_Match();
-                void *aikL108 = aikM108 ? game_sdk->GetLocalPlayer(aikM108) : nullptr;
-                void *aikE108 = GetClosestEnemyAik(); // instant target (00s)
-                if (aikL108 && aikE108)
-                    Send108(aikL108, aikE108);
-            }
             if (Vars.AimFov > 0) {
                 Vars.isAimFov = true;
             } else {

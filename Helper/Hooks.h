@@ -34,6 +34,9 @@ struct Vars_t
     bool Telekill = {};
     bool AimKillSend = {}; // SEND button: crafts the game's own C2S damage packet (Android EliteXzp port)
     bool AimKill360 = {};  // AIMKILL 360: rotate toward target so the hit registers (Elite Aimkill360)
+    int  AimKillMax = 4;   // burst size: enemies struck in ONE frame (4 = quad kill)
+    int  AimKillDmg = 999; // forced head damage floor (weapon base < 100 -> this)
+    float AimKillCd = 0.35f; // per-enemy re-strike cooldown (s) — stops packet spam
     bool fly = {};        // RUNN (ninja run)
     bool Flyingtest = {}; // Fly V2
     float flySpeed = 0.75f;
@@ -536,6 +539,106 @@ void *GetClosestEnemyAik()
     {
         return NULL;
     }
+}
+
+// Burst targeting (AimKill quad): collect up to maxN closest live enemies in
+// ONE dictionary scan (sorted closest-first, same filters as GetClosestEnemyAik).
+static int AikCollectEnemies(void **out, int maxN)
+{
+    if (!out || maxN <= 0)
+        return 0;
+    if (maxN > 8)
+        maxN = 8;
+    try
+    {
+        void *match = game_sdk->Curent_Match();
+        if (!match)
+            return 0;
+        void *local = game_sdk->GetLocalPlayer(match);
+        if (!local || !game_sdk->Component_GetTransform(local))
+            return 0;
+        Dictionary<uint8_t *, void **> *players =
+            *(Dictionary<uint8_t *, void **> **)((long)match + oxo("0x148"));
+        if (!players)
+            return 0;
+        Vector3 lp = getPosition(local);
+        float best[8];
+        int n = 0;
+        for (int u = 0; u < players->getSize(); u++)
+        {
+            void *p = players->getValues()[u];
+            if (!p || p == local)
+                continue;
+            if (!game_sdk->get_MaxHP(p))
+                continue;
+            if (game_sdk->get_IsDieing(p))
+                continue;
+            if (game_sdk->get_isLocalTeam(p))
+                continue;
+            if (game_sdk->GetHp(p) <= 0)
+                continue;
+            void *tf = game_sdk->Component_GetTransform(p);
+            if (!tf)
+                continue;
+            Vector3 ep = game_sdk->get_position(tf);
+            if (ep == Vector3::zero())
+                continue;
+            float d = Vector3::Distance(ep, lp);
+            if (n >= maxN && d >= best[maxN - 1])
+                continue;
+            int i = (n < maxN) ? n : maxN - 1;
+            while (i > 0 && best[i - 1] > d)
+            {
+                best[i] = best[i - 1];
+                out[i] = out[i - 1];
+                i--;
+            }
+            best[i] = d;
+            out[i] = p;
+            if (n < maxN)
+                n++;
+        }
+        return n;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+// Per-enemy strike cooldown: without it the burst would re-send 4 packets every
+// render frame to the same targets (packet flood -> server reject / ban risk).
+static void *g_aikCdMatch = nullptr;
+struct AikCdEntry { void *p; float t; };
+static AikCdEntry g_aikCd[16];
+
+static bool AikOnCooldown(void *match, void *p, float now)
+{
+    if (match != g_aikCdMatch)
+    {
+        g_aikCdMatch = match;
+        for (int i = 0; i < 16; i++) { g_aikCd[i].p = nullptr; g_aikCd[i].t = 0.0f; }
+    }
+    for (int i = 0; i < 16; i++)
+        if (g_aikCd[i].p == p)
+            return (now - g_aikCd[i].t) < Vars.AimKillCd;
+    return false;
+}
+
+static void AikMarkStruck(void *p, float now)
+{
+    int slot = 0;
+    bool found = false;
+    for (int i = 0; i < 16; i++)
+    {
+        if (g_aikCd[i].p == p) { slot = i; found = true; break; }
+        if (!g_aikCd[i].p && !found) slot = i;
+    }
+    if (!found)
+        for (int i = 1; i < 16; i++)
+            if (g_aikCd[i].t < g_aikCd[slot].t) slot = i; // recycle oldest
+    g_aikCd[slot].p = p;
+    g_aikCd[slot].t = now;
 }
 
 void ProcessAimbot()
@@ -1388,6 +1491,22 @@ static bool AikInRange(void *local, void *enemy, void *weapon)
     return Vector3::Distance(h1, h2) <= range;
 }
 
+// Burst variant: local head resolved ONCE for the whole wave (was 2 head
+// lookups per target -> 8 on a quad).
+static bool AikInRangeH(Vector3 h1, void *enemy, void *weapon)
+{
+    Vector3 h2;
+    if (!AikHeadPos(enemy, &h2))
+        return false;
+    float range = aik.GetRange(weapon);
+    if (range <= 0.0f)
+        return false;
+    return Vector3::Distance(h1, h2) <= range;
+}
+
+// burst mode: suppress the per-strike opcode-108 swap sync (one at the end)
+static bool g_aikBurst = false;
+
 // --- AimKill Send v2 (gaps from Android port) --------------------------------
 // Telemetry: st = last StartAimkill gate (1 ran / 2 no-match / 3 not-live /
 // 4 no-enemy / 5 enemy-fail / 6 no-gun / 7 not-a-gun / 8 out-of-range /
@@ -1562,7 +1681,8 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     // (old st=7), <100 -> 999 so the packet lands as a kill
     int32_t baseDamage = *(int32_t *)((uintptr_t)weapon + 0xA8);
     if (baseDamage == 0) { aikDbgSt = 7; return false; }
-    if (baseDamage < 100) baseDamage = 999;
+    int32_t forceDmg = Vars.AimKillDmg < 100 ? 999 : Vars.AimKillDmg;
+    if (baseDamage < 100) baseDamage = forceDmg;
     uint32_t weaponID = aik.GetWeaponID(weapon);
 
     // old zexisyy: full hit-object pool fill from the enemy's AimTarget —
@@ -1674,8 +1794,14 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     // swap weapon IN the strike (user: "zide fiha swap weapon f l'Aimkill") =
     // Elite order L2868-2870: StopFire -> Syns_SwapWeapon_Impl(108) -> reset.
     // Our Send108 IS that opcode-108 change-inventory-on-hand packet.
-    Send108(local, target);
-    aik.ResetSwapTime(local);
+    // QUAD: in burst mode the 108 + swap-reset are deferred to ONE sync after
+    // the whole wave — per-target swaps were re-arming the weapon every kill
+    // (that's the "2 kills, then 2 more" stall).
+    if (!g_aikBurst)
+    {
+        Send108(local, target);
+        aik.ResetSwapTime(local);
+    }
     return true;
 }
 
@@ -2749,7 +2875,7 @@ static void AikStrikePhase(void *local, void *enemy) {
 // 7 not-a-gun (or weapon baseDamage 0) / 8 out-of-range / 9 SENT /
 // 10 no-pool-or-head / 11 AikInit fail (or strike refused w/o a code) /
 // 12 no-checkParams / 13 no-damage-msg / 14 strike gate (dead/LOS/head) /
-// 15 no-TimeService.  n: 1 = target acquired.
+// 15 no-TimeService.  n: targets acquired this frame.
 // s: packets sent (AikStrike ++).  c: cover (always 0, cover removed).
 void StartAimkill() {
     if (!Vars.AimKillSend && !Vars.AimKill360) return;
@@ -2764,45 +2890,92 @@ void StartAimkill() {
     if (!local || !game_sdk->Component_GetTransform(local)) { aikDbgSt = 2; return; }
     if (game_sdk->get_IsDieing(local) || game_sdk->GetHp(local) <= 0) { aikDbgSt = 3; return; }
 
-    void *enemy = GetClosestEnemyAik(); // instant — bla FOV/angle gates (00s)
-    if (!enemy || enemy == local) { aikDbgSt = 4; return; }
-    if (!game_sdk->Component_GetTransform(enemy)) { aikDbgSt = 5; return; }
-    if (game_sdk->get_MaxHP && !game_sdk->get_MaxHP(enemy)) { aikDbgSt = 5; return; }
-    if (game_sdk->get_isLocalTeam && game_sdk->get_isLocalTeam(enemy)) { aikDbgSt = 5; return; }
-    if (game_sdk->get_IsDieing && game_sdk->get_IsDieing(enemy)) { aikDbgSt = 5; return; }
-    if (game_sdk->GetHp(enemy) <= 0) { aikDbgSt = 5; return; }
+    // QUAD burst: ONE dictionary scan collects the N closest enemies, then every
+    // strike goes out in THIS frame (no per-kill swap stall).
+    int want = Vars.AimKillMax;
+    if (want < 1) want = 1;
+    if (want > 8) want = 8;
+    void *targets[8];
+    int nT = AikCollectEnemies(targets, want);
+    if (nT <= 0) { aikDbgSt = 4; return; }
+    aikDbgN = nT;
     // cover/LOS gates REMOVED (user: "hyd mnha l'cover ... 0 second") — the
-    // candidate checks above are all that's left (zexisyy had no LOS gate)
-    aikDbgN = 1;
+    // collect filters above are all that's left (zexisyy had no LOS gate)
 
-    // AIMKILL 360 — Elite Aimkill360 + AimRotationGhost_Begin/End: face the
-    // enemy ONLY while the hit packet is built, then hand the player's own
-    // rotation straight back in the SAME frame — the view never follows him
-    // ("t9tel bla manchouf fih": kill from behind while you keep looking the
-    // other way, wakha tddar l-aim wraya). Target = GetClosestEnemyAik =
-    // NEAREST living enemy every frame, so a squad in front drops one by one,
-    // fast ("la kano rab3a gadmya: tkhtar aqreb wa7ed w kt9tlo b sor3a").
-    Quaternion aik360Orig;
-    bool aik360Ghost = false;
-    if (Vars.AimKill360)
+    void *weapon = aik.GetWeaponOnHand(local);
+    if (!weapon) { aikDbgSt = 6; return; }
+    if (!AikIsValidGun(weapon)) { aikDbgSt = 7; return; } // Elite IsValidGun gate
+
+    Vector3 localHead;
+    if (!AikHeadPos(local, &localHead)) { aikDbgSt = 10; return; }
+
+    bool anyKill = false;
+    bool anyStrike = false;
+    float now = aik.Realtime();
+    // no per-target 108 / swap-reset while the wave runs (deferred below)
+    g_aikBurst = true;
+    for (int i = 0; i < nT; i++)
     {
-        Vector3 eHead = GetHeadPosition(enemy);
-        Vector3 myPos = CameraMain(local);
-        if (eHead != Vector3::zero() && myPos != Vector3::zero())
+        void *enemy = targets[i];
+        if (!enemy || enemy == local)
+            continue;
+        if (game_sdk->get_IsDieing(enemy) || game_sdk->GetHp(enemy) <= 0)
+            continue; // killed by an earlier packet in this same wave
+        if (AikOnCooldown(match, enemy, now))
+            continue; // struck recently — wait out the cooldown
+        if (!AikInRangeH(localHead, enemy, weapon))
+            continue; // out of range for this one, keep the rest of the wave
+
+        // AIMKILL 360 — Elite Aimkill360 + AimRotationGhost_Begin/End: face the
+        // enemy ONLY while the hit packet is built, then hand the player's own
+        // rotation straight back in the SAME frame — the view never follows him
+        // ("t9tel bla manchouf fih": kill from behind while you keep looking the
+        // other way, wakha tddar l-aim wraya). Every target of the wave gets the
+        // same begin/end pair, so a squad drops in one frame.
+        Quaternion aik360Orig;
+        bool aik360Ghost = false;
+        if (Vars.AimKill360)
         {
-            aik360Orig = GetCurrentRotation(local);
-            game_sdk->set_aim(local, GetRotationToTheLocation(eHead, 0.1f, myPos));
-            aik360Ghost = true;
+            Vector3 eHead = GetHeadPosition(enemy);
+            Vector3 myPos = CameraMain(local);
+            if (eHead != Vector3::zero() && myPos != Vector3::zero())
+            {
+                aik360Orig = GetCurrentRotation(local);
+                game_sdk->set_aim(local, GetRotationToTheLocation(eHead, 0.1f, myPos));
+                aik360Ghost = true;
+            }
+        }
+
+        // strike phase: AikStrikePhase gates (AikInit/gun/range/pool/head) and
+        // sends the packet itself (aikDbgSt = 9 on success)
+        int hpBefore = game_sdk->GetHp(enemy);
+        aikDbgSt = 11; // provisional: AikStrike overwrites with the exact gate
+        AikStrikePhase(local, enemy);
+
+        // Elite AimRotationGhost_End — runs on EVERY exit path of the strike
+        if (aik360Ghost)
+            game_sdk->set_aim(local, aik360Orig);
+
+        if (aikDbgSt == 9) // packet sent
+        {
+            AikMarkStruck(enemy, now);
+            anyStrike = true;
+            if (game_sdk->GetHp(enemy) < hpBefore ||
+                (game_sdk->get_IsDieing && game_sdk->get_IsDieing(enemy)))
+                anyKill = true;
         }
     }
+    g_aikBurst = false;
 
-    // strike phase split into its own function so EVERY exit path below
-    // (gate 6/7/8/10/11/12/13/14/15, refused strike) still hands the aim
-    // back — Elite AimRotationGhost_End runs right after the fire call.
-    AikStrikePhase(local, enemy);
-
-    if (aik360Ghost)
-        game_sdk->set_aim(local, aik360Orig); // Elite AimRotationGhost_End
+    // one sync for the whole wave (was: swap+108 after every single kill)
+    if (anyStrike)
+    {
+        if (Send108(local, targets[0]))
+            aik.ResetSwapTime(local);
+    }
+    // Elite AimkillRefreshAfterKill: SwapWeapon 1/2 + reset once per wave
+    if (anyKill)
+        AikRefreshAfterKill(local);
 }
 
 // ==== Send108 — zexisyy part 2 verbatim (AimKill -> Vars.AimKillSend) =======
