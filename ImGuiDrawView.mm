@@ -589,6 +589,8 @@ ImFont* Urbanist;
                         if (ImGui::Checkbox(oxorany("AimKill 360"), &Vars.AimKill360)) gFltShow[FLTBTN_AIMKILL360] = Vars.AimKill360;
                         ImGui::SliderInt(oxorany("Kill Count"), &Vars.AimKillMax, 1, 8);
                         ImGui::SliderInt(oxorany("Kill Damage"), &Vars.AimKillDmg, 100, 100000);
+                        ImGui::SliderFloat(oxorany("Kill Cooldown"), &Vars.AimKillCd, 0.0f, 2.0f, "%.2fs");
+                        ImGui::Checkbox(oxorany("Ignore Range"), &Vars.AimKillIgnoreRange);
                         ImGui::Text("Aik: st:%d n:%d s:%d c:%d", aikDbgSt, aikDbgN, aikDbgSent, aikDbgC); // st9=sent, st11=AikInit, st12-15=strike gates, s>0=packets, c: cover always 0 (removed)
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("Button Stop Time"), &Vars.StopTime)) gFltShow[FLTBTN_STOPTIME] = Vars.StopTime; // own option (user: bouhdo)

@@ -36,6 +36,7 @@ struct Vars_t
     bool AimKill360 = {};  // AIMKILL 360: rotate toward target so the hit registers (Elite Aimkill360)
     int  AimKillMax = 4;   // burst size: enemies struck in ONE frame (4 = quad kill)
     int  AimKillDmg = 999; // forced head damage floor (weapon base < 100 -> this)
+    bool AimKillIgnoreRange = false; // 360/quad: skip the weapon-range gate (cross-map strikes)
     float AimKillCd = 0.35f; // per-enemy re-strike cooldown (s) — stops packet spam
     bool fly = {};        // RUNN (ninja run)
     bool Flyingtest = {}; // Fly V2
@@ -307,7 +308,12 @@ static Vector3 CameraMain(void *player) {
     // ======================== [تم التحديث: CameraMain Offset] ========================
     // القديم: 0x388
     // الجديد: 0x3e8
-    return game_sdk->get_position(*(void **)((uint64_t)player + oxo("0x3e8")));//public Transform MainCameraTransform;
+    if (!player)
+        return Vector3::zero();
+    void *camTf = *(void **)((uint64_t)player + oxo("0x3e8")); //public Transform MainCameraTransform;
+    if (!camTf)
+        return Vector3::zero();
+    return game_sdk->get_position(camTf);
 }
 
 Quaternion GetRotationToTheLocation(Vector3 Target, float Height, Vector3 MyEnemy) {
@@ -1482,6 +1488,8 @@ static bool AikIsValidGun(void *weapon)
 // and no 120 m default — that rule refused shots the old build accepted.
 static bool AikInRange(void *local, void *enemy, void *weapon)
 {
+    if (Vars.AimKillIgnoreRange)
+        return true; // 360/quad: weapon range is not a gate anymore
     Vector3 h1, h2;
     if (!AikHeadPos(local, &h1) || !AikHeadPos(enemy, &h2))
         return false;
@@ -1495,6 +1503,8 @@ static bool AikInRange(void *local, void *enemy, void *weapon)
 // lookups per target -> 8 on a quad).
 static bool AikInRangeH(Vector3 h1, void *enemy, void *weapon)
 {
+    if (Vars.AimKillIgnoreRange)
+        return true; // 360/quad: weapon range is not a gate anymore
     Vector3 h2;
     if (!AikHeadPos(enemy, &h2))
         return false;
@@ -1696,21 +1706,29 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     if (dist > 0.0001f)
         direction = (enemyHead - firePos) * (1.0f / dist);
     void *aimTarget = *(void **)((uintptr_t)target + 0x738); // Player.AimTarget
-    if (aimTarget)
     {
+        // AIMKILL 360 fix: AimTarget is null for a lot of live players, and the
+        // old code left the whole pool (HitLocation/RayDir/Distance/flags) empty
+        // in that case -> CheckParametros refused the shot (st=12). Fall back to
+        // the head collider/gameobject that AikStrike already resolved.
         char *pool = (char *)hitInfo;
-        *(void **)(pool + 0x18) = aik.GameObjectOf(aimTarget);
-        *(void **)(pool + 0x20) = aimTarget;
-        *(Vector3 *)(pool + 0x28) = enemyHead;   // HitLocation
-        *(Vector3 *)(pool + 0x34) = direction;   // RayDir
-        *(Vector3 *)(pool + 0x40) = direction;   // RayDir2
-        *(Vector3 *)(pool + 0x4C) = firePos;     // StartPos
-        *(int32_t *)(pool + 0x58) = baseDamage;  // Damage
-        *(float *)(pool + 0x5C) = dist;          // Distance
-        *(int32_t *)(pool + 0x60) = 1;           // Flags60
-        *(int32_t *)(pool + 0x64) = 1;           // Flags64
-        *(bool *)(pool + 0x70) = true;           // Flag70
-        *(bool *)(pool + 0x71) = true;           // Flag71
+        void *poolGO = aimTarget ? aik.GameObjectOf(aimTarget) : headGameObject;
+        void *poolCollider = aimTarget ? aimTarget : headCollider;
+        if (poolGO && poolCollider)
+        {
+            *(void **)(pool + 0x18) = poolGO;
+            *(void **)(pool + 0x20) = poolCollider;
+            *(Vector3 *)(pool + 0x28) = enemyHead;   // HitLocation
+            *(Vector3 *)(pool + 0x34) = direction;   // RayDir
+            *(Vector3 *)(pool + 0x40) = direction;   // RayDir2
+            *(Vector3 *)(pool + 0x4C) = firePos;     // StartPos
+            *(int32_t *)(pool + 0x58) = baseDamage;  // Damage
+            *(float *)(pool + 0x5C) = dist;          // Distance
+            *(int32_t *)(pool + 0x60) = 1;           // Flags60
+            *(int32_t *)(pool + 0x64) = 1;           // Flags64
+            *(bool *)(pool + 0x70) = true;           // Flag70
+            *(bool *)(pool + 0x71) = true;           // Flag71
+        }
     }
 
     // old zexisyy: local damage-info writes (HitPart / Weapon / DamageValue /
@@ -2936,7 +2954,9 @@ void StartAimkill() {
         bool aik360Ghost = false;
         if (Vars.AimKill360)
         {
-            Vector3 eHead = GetHeadPosition(enemy);
+            Vector3 eHead;
+            if (!AikHeadPos(enemy, &eHead))
+                eHead = Vector3::zero();
             Vector3 myPos = CameraMain(local);
             if (eHead != Vector3::zero() && myPos != Vector3::zero())
             {
