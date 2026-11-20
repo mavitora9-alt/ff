@@ -77,7 +77,7 @@ public:
     bool (*get_IsDieing)(void *player);
     int (*get_MaxHP)(void *player);
     Vector3 (*GetForward)(void *player);
-    void (*set_aim)(void *, Quaternion look);
+    void (*set_aim)(void *, Quaternion look, bool force);
     bool (*get_IsSighting)(void *player);
     bool (*get_IsFiring)(void *player);
     monoString *(*name)(void *player);
@@ -165,7 +165,7 @@ void game_sdk_t::init()
     // ======================== [تم التحديث: set_aim] ========================
     // القديم: 0x5433004
     // الجديد: 0x5636F80
-    this->set_aim = (void (*)(void *, Quaternion))getRealOffset(oxo("0x5636F80"));
+    this->set_aim = (void (*)(void *, Quaternion, bool))getRealOffset(oxo("0x5636F80"));
 
     // ======================== [تم التحديث: get_IsSighting] ========================
     // القديم: 0x5425F84
@@ -684,7 +684,7 @@ void ProcessAimbot()
 
     if (shouldAim)
     {
-        game_sdk->set_aim(LocalPlayer, PlayerLook);
+        game_sdk->set_aim(LocalPlayer, PlayerLook, false);
     }
 }
 void get_players()
@@ -1751,6 +1751,15 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
         *(int32_t *)((uintptr_t)dmgInfo + 0x10) = baseDamage;           // DamageValue
         *(AikPlayerId *)((uintptr_t)dmgInfo + 0x28) =
             *(AikPlayerId *)((uintptr_t)local + 0x408);                 // AttackerID = local PlayerID
+        // HNLIMBLIANL geometry: the server-side range/LOS check is computed
+        // from these, so a cross-map strike must carry the real origin/impact.
+        *(int32_t *)((uintptr_t)dmgInfo + 0x48) = (int32_t)weaponID;    // weapon data id
+        *(Vector3 *)((uintptr_t)dmgInfo + 0x4C) = firePos;              // HOOMBLGOEPL origin
+        *(Vector3 *)((uintptr_t)dmgInfo + 0x58) = enemyHead;            // KEOAMDFAOLM impact
+        *(Vector3 *)((uintptr_t)dmgInfo + 0x64) = direction;            // DOJDNHCGFGK dir
+        *(int16_t *)((uintptr_t)dmgInfo + 0x70) = (int16_t)weaponID;    // CLOLKHNMNEK
+        *(bool *)((uintptr_t)dmgInfo + 0x72) = false;                   // FDJNCEIGHGB
+        *(int32_t *)((uintptr_t)dmgInfo + 0x74) = 0;                    // OCOCPPNPHKN
     }
 
     void *timeService = aik.TimeService();
@@ -1768,11 +1777,15 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     // works off-aim), and CheckParams takes the ENEMY as its 2nd argument
     void *aiming = aik.GetAiming(local, hitInfo); // Player.JGIEOGCGFEP
     (void)aiming;
-    void *checkParams = aik.CheckParams(weapon, target, headCollider, false, (void *)0);
+    // HBIBDMMOOOK.NPLMKLBKJPE(AttackableEntity, Collider, bool, HNLIMBLIANL)
+    // -> List<float> damage values. The 5th arg is the damage-info object the
+    // game itself fills for a real shot (Player.Attributes+0x318 -> +0x10);
+    // passing NULL there returns NULL every time (that was st=12).
+    void *checkParams = aik.CheckParams(weapon, target, headCollider, false, dmgInfo);
     if (!checkParams)
     {
         aik.StopFire(local, weapon);
-        aikDbgSt = 12;
+        aikDbgSt = dmgInfo ? 16 : 12;
         return false;
     }
     // old zexisyy: WeaponDoSomething/Validate called UNCONDITIONALLY (the
@@ -2961,7 +2974,7 @@ void StartAimkill() {
             if (eHead != Vector3::zero() && myPos != Vector3::zero())
             {
                 aik360Orig = GetCurrentRotation(local);
-                game_sdk->set_aim(local, GetRotationToTheLocation(eHead, 0.1f, myPos));
+                game_sdk->set_aim(local, GetRotationToTheLocation(eHead, 0.1f, myPos), false);
                 aik360Ghost = true;
             }
         }
@@ -2974,7 +2987,7 @@ void StartAimkill() {
 
         // Elite AimRotationGhost_End — runs on EVERY exit path of the strike
         if (aik360Ghost)
-            game_sdk->set_aim(local, aik360Orig);
+            game_sdk->set_aim(local, aik360Orig, false);
 
         if (aikDbgSt == 9) // packet sent
         {
