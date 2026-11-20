@@ -1667,6 +1667,28 @@ static void AikShuffleValidate(void *weapon, void *params, uint32_t seedEnc)
 // 14 strike gate (dead / no head) / 15 no-TimeService.
 
 static bool Send108(void *local, void *enemy); // zexisyy part 2 (defined below)
+static void *UnitySym(const char *name);
+static void *FindGameClass(const char *nameSpace, const char *name);
+
+// message.EBEDJLFHHHP = C2S_RUDP_TakeDamage_Req (opcode 106).
+// The only producer in the game is PhyXShield.GLEMOCGDGHM() — an INSTANCE
+// method on a shield entity. Calling it with the Player as `this` read the
+// shield fields (0x88/0x8C) out of a Player object and crashed the game on
+// the first strike. Allocate it through il2cpp instead (public ctor 0x2772AF4).
+static void *NewMsg106()
+{
+    static void *klass = nullptr;
+    static void *(*objectNew)(void *) = nullptr;
+    static void (*ctor)(void *) = nullptr;
+    if (!klass) klass = FindGameClass("message", "EBEDJLFHHHP");
+    if (!objectNew) objectNew = (void *(*)(void *))UnitySym("il2cpp_object_new");
+    if (!ctor) ctor = (void (*)(void *))getRealOffset(oxo("0x2772AF4"));
+    if (!klass || !objectNew || !ctor) return nullptr;
+    void *obj = objectNew(klass);
+    if (!obj) return nullptr;
+    ctor(obj);
+    return obj;
+}
 
 static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos, void *target)
 {
@@ -1764,7 +1786,7 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
 
     void *timeService = aik.TimeService();
     if (!timeService) { aikDbgSt = 15; return false; }
-    void *msg = aik.MakeDamageMsg(local); // -> EBEDJLFHHHP
+    void *msg = NewMsg106(); // message.EBEDJLFHHHP, proper il2cpp allocation
     if (!msg) { aikDbgSt = 13; return false; }
 
     // Android order: ComputeAndStoreHashExact BEFORE CheckParametros (L2827→2828)
@@ -1810,11 +1832,18 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     Vector3 hitPos;
     if (!AikHeadPos(target, &hitPos))
         hitPos = firePos;
-    *(void **)((uintptr_t)msg + 0x38) = aik.MakeVecMsg(firePos);                 // HOOMBLGOEPL firePos
-    *(void **)((uintptr_t)msg + 0x40) = aik.MakeVecMsg(hitPos);                  // KECMKGHBLDO hitPos
+    void *vFire = aik.MakeVecMsg(firePos);
+    void *vHit = aik.MakeVecMsg(hitPos);
+    if (!vFire || !vHit) { aikDbgSt = 13; return false; }
+    *(void **)((uintptr_t)msg + 0x38) = vFire;                                   // HOOMBLGOEPL firePos
+    *(void **)((uintptr_t)msg + 0x40) = vHit;                                    // KECMKGHBLDO hitPos
     *(void **)((uintptr_t)msg + 0x48) = checkParams;                             // EEAJDJFLPMN CheckParametros
     *(uint8_t *)((uintptr_t)msg + 0x62) = 0;                                     // FDJNCEIGHGB
-    *(uint8_t *)((uintptr_t)msg + 0x63) = 1;                                     // PJAOHJCJKLE
+    // IEABEPHBPEA @0x68 is a List<byte> filled only by the game's own hash
+    // path; Serialize would deref it, so keep the "has bytes" flag off when
+    // the ctor left it null (that was a hard crash on the first packet).
+    *(uint8_t *)((uintptr_t)msg + 0x63) =
+        (*(void **)((uintptr_t)msg + 0x68) != nullptr) ? 1 : 0;                  // PJAOHJCJKLE
     *(float *)((uintptr_t)msg + 0x70) = aik.Realtime();                          // KHBDOIKPPFI realtime
     *(uint8_t *)((uintptr_t)msg + 0x74) = 0;                                     // ACJANANIPIM
 
@@ -1842,8 +1871,10 @@ static void AikRefreshAfterKill(void *local)
 {
     if (!local)
         return;
-    aik.SwapWeapon(local, 1, false, (void *)0);
-    aik.SwapWeapon(local, 2, false, (void *)0);
+    // PlayerNetwork.SwapWeapon(int, bool, List<int>) — the 3rd argument is a
+    // real List<int> in the dump; the old code passed NULL and the override
+    // enumerates it, which is an instant NPE inside il2cpp (hard crash).
+    // Re-arming the slots is cosmetic, so only the swap-time reset stays.
     aik.ResetSwapTime(local);
 }
 
