@@ -43,6 +43,7 @@ ImFont* pixel_big = {};
 ImFont* pixel_smol = {};
 #include "Helper/Obfuscate.h"
 #import "Helper/Hooks.h"
+#import "Helper/Telemetry.h"
 #include <OpenGLES/ES2/gl.h>
 #include <OpenGLES/ES2/glext.h>
 #include <unistd.h>
@@ -438,6 +439,8 @@ ImFont* Urbanist;
     CGFloat framebufferScale = view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale;
     io.DisplayFramebufferScale = ImVec2(framebufferScale, framebufferScale);
     io.DeltaTime = 1 / float(view.preferredFramesPerSecond ?: 60);
+
+    FfTelTick(MenDeal);
     
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
         
