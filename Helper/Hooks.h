@@ -1,6 +1,9 @@
 #import "vinhtran.hpp"
 #import "loading.hxx"
 #include <fstream>
+#include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <chrono> // needed by Telekill +7 m pin (L~1154) — top-level so it's in scope everywhere
 #define FMT_HEADER_ONLY
 #include "fmt/core.h"
@@ -34,7 +37,7 @@ struct Vars_t
     bool Telekill = {};
     bool AimKillSend = {}; // SEND button: crafts the game's own C2S damage packet (Android EliteXzp port)
     bool AimKill360 = {};  // AIMKILL 360: rotate toward target so the hit registers (Elite Aimkill360)
-    int  AimKillMax = 4;   // burst size: enemies struck in ONE frame (4 = quad kill)
+    int  AimKillMax = 1;   // burst size: enemies struck in ONE frame (raise after the first kill works)
     int  AimKillDmg = 999; // forced head damage floor (weapon base < 100 -> this)
     bool AimKillIgnoreRange = false; // 360/quad: skip the weapon-range gate (cross-map strikes)
     float AimKillCd = 0.35f; // per-enemy re-strike cooldown (s) — stops packet spam
@@ -1525,6 +1528,21 @@ static bool g_aikBurst = false;
 // target is acquired, s = packets sent (Elite AimkillSendStrike path).
 // Shown in the FEATURES tab.
 static int aikDbgSt = 0, aikDbgN = 0, aikDbgSent = 0;
+
+// Crash tracer: append one line per step to /tmp/ff_aik.log (Filza-visible).
+// If the game dies inside an il2cpp call, the last line tells us exactly which
+// call it was. Cheap (open/append/close) and only runs on the strike path.
+static void AikTrace(const char *tag)
+{
+    int fd = open("/tmp/ff_aik.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0)
+        return;
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "%s st=%d n=%d s=%d\n", tag, aikDbgSt, aikDbgN, aikDbgSent);
+    if (n > 0)
+        write(fd, buf, (size_t)n);
+    close(fd);
+}
 // cover state (SmartCoverKill, Elite port): 0 none / 1 attempt / 2 pulled
 static int aikDbgC = 0;
 
@@ -1784,26 +1802,35 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
         *(int32_t *)((uintptr_t)dmgInfo + 0x74) = 0;                    // OCOCPPNPHKN
     }
 
+    AikTrace("pre TimeService");
     void *timeService = aik.TimeService();
-    if (!timeService) { aikDbgSt = 15; return false; }
+    if (!timeService) { aikDbgSt = 15; AikTrace("no TimeService"); return false; }
+    AikTrace("pre NewMsg106");
     void *msg = NewMsg106(); // message.EBEDJLFHHHP, proper il2cpp allocation
-    if (!msg) { aikDbgSt = 13; return false; }
+    if (!msg) { aikDbgSt = 13; AikTrace("no msg106"); return false; }
 
     // Android order: ComputeAndStoreHashExact BEFORE CheckParametros (L2827→2828)
+    AikTrace("pre hash");
     uint32_t enemyId = aik.IdToU32(aik.GetPlayerID(target));
     AikStoreHitHash(weapon, target, *(uint32_t *)((uintptr_t)timeService + 0x20));
 
+    AikTrace("pre StartFiring");
     aik.StartFiring(local, weapon);
+    AikTrace("post StartFiring");
 
     // old: the aiming entity is resolved but NEVER gates the strike (aimkill
     // works off-aim), and CheckParams takes the ENEMY as its 2nd argument
+    AikTrace("pre GetAiming");
     void *aiming = aik.GetAiming(local, hitInfo); // Player.JGIEOGCGFEP
     (void)aiming;
+    AikTrace("post GetAiming");
     // HBIBDMMOOOK.NPLMKLBKJPE(AttackableEntity, Collider, bool, HNLIMBLIANL)
     // -> List<float> damage values. The 5th arg is the damage-info object the
     // game itself fills for a real shot (Player.Attributes+0x318 -> +0x10);
     // passing NULL there returns NULL every time (that was st=12).
+    AikTrace("pre CheckParams");
     void *checkParams = aik.CheckParams(weapon, target, headCollider, false, dmgInfo);
+    AikTrace(checkParams ? "post CheckParams ok" : "post CheckParams null");
     if (!checkParams)
     {
         aik.StopFire(local, weapon);
@@ -1815,7 +1842,11 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     static void (*wValidate)(void *, void *, uint32_t) =
         (void (*)(void *, void *, uint32_t))getRealOffset(oxo("0x5C2B3F0"));
     if (wValidate)
+    {
+        AikTrace("pre validate");
         wValidate(weapon, checkParams, enemyId); // seedEnc = IdToU32(enemyID)
+        AikTrace("post validate");
+    }
 
     // EBEDJLFHHHP fields — same type order as the Android message struct:
     // attacker/hp/zero/damage|part/victim/weapon/uniq/part/tick/...
@@ -1832,9 +1863,10 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     Vector3 hitPos;
     if (!AikHeadPos(target, &hitPos))
         hitPos = firePos;
+    AikTrace("pre MakeVecMsg");
     void *vFire = aik.MakeVecMsg(firePos);
     void *vHit = aik.MakeVecMsg(hitPos);
-    if (!vFire || !vHit) { aikDbgSt = 13; return false; }
+    if (!vFire || !vHit) { aikDbgSt = 13; AikTrace("no vec msg"); return false; }
     *(void **)((uintptr_t)msg + 0x38) = vFire;                                   // HOOMBLGOEPL firePos
     *(void **)((uintptr_t)msg + 0x40) = vHit;                                    // KECMKGHBLDO hitPos
     *(void **)((uintptr_t)msg + 0x48) = checkParams;                             // EEAJDJFLPMN CheckParametros
@@ -1847,10 +1879,14 @@ static bool AikStrike(void *local, void *weapon, void *hitInfo, Vector3 firePos,
     *(float *)((uintptr_t)msg + 0x70) = aik.Realtime();                          // KHBDOIKPPFI realtime
     *(uint8_t *)((uintptr_t)msg + 0x74) = 0;                                     // ACJANANIPIM
 
+    AikTrace("pre Send 106");
     aik.Send(106, msg, 2, 0); // opcode 106 = C2S_RUDP_TakeDamage_Req
+    AikTrace("post Send 106");
     aikDbgSent++;
 
+    AikTrace("pre StopFire");
     aik.StopFire(local, weapon);
+    AikTrace("post StopFire");
     // swap weapon IN the strike (user: "zide fiha swap weapon f l'Aimkill") =
     // Elite order L2868-2870: StopFire -> Syns_SwapWeapon_Impl(108) -> reset.
     // Our Send108 IS that opcode-108 change-inventory-on-hand packet.
@@ -3014,7 +3050,9 @@ void StartAimkill() {
         // sends the packet itself (aikDbgSt = 9 on success)
         int hpBefore = game_sdk->GetHp(enemy);
         aikDbgSt = 11; // provisional: AikStrike overwrites with the exact gate
+        AikTrace("pre strike phase");
         AikStrikePhase(local, enemy);
+        AikTrace("post strike phase");
 
         // Elite AimRotationGhost_End — runs on EVERY exit path of the strike
         if (aik360Ghost)
