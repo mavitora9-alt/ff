@@ -1529,16 +1529,58 @@ static bool g_aikBurst = false;
 // Shown in the FEATURES tab.
 static int aikDbgSt = 0, aikDbgN = 0, aikDbgSent = 0;
 
-// Crash tracer: append one line per step to /tmp/ff_aik.log (Filza-visible).
+// Crash tracer: append one line per step (Filza-visible, app-sandbox safe).
 // If the game dies inside an il2cpp call, the last line tells us exactly which
-// call it was. Cheap (open/append/close) and only runs on the strike path.
+// call it was. The path is shown in the FEATURES panel (TextWrapped).
+static char aikLastTrace[64] = "none";
+static char aikTracePath[512] = "";
+
 static void AikTrace(const char *tag)
 {
-    int fd = open("/tmp/ff_aik.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    static char path[512] = {0};
+    if (tag)
+    {
+        size_t i = 0;
+        for (; tag[i] && i + 1 < sizeof(aikLastTrace); i++)
+            aikLastTrace[i] = tag[i];
+        aikLastTrace[i] = 0;
+    }
+    if (!path[0])
+    {
+        // /tmp is NOT writable from inside the app sandbox on rootless jailbreak;
+        // the app container's own tmp always is.
+        const char *cands[3] = {nullptr, "/tmp/ff_aik.log", "/var/mobile/Documents/ff_aik.log"};
+#ifdef __OBJC__
+        static char tmpPath[512];
+        NSString *p = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ff_aik.log"];
+        const char *c = [p fileSystemRepresentation];
+        if (c && c[0])
+        {
+            snprintf(tmpPath, sizeof(tmpPath), "%s", c);
+            cands[0] = tmpPath;
+        }
+#endif
+        for (int i = 0; i < 3; i++)
+        {
+            if (!cands[i])
+                continue;
+            int t = open(cands[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (t >= 0)
+            {
+                close(t);
+                snprintf(path, sizeof(path), "%s", cands[i]);
+                break;
+            }
+        }
+        if (!path[0])
+            snprintf(path, sizeof(path), "/tmp/ff_aik.log");
+        snprintf(aikTracePath, sizeof(aikTracePath), "%s", path);
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0)
         return;
-    char buf[128];
-    int n = snprintf(buf, sizeof(buf), "%s st=%d n=%d s=%d\n", tag, aikDbgSt, aikDbgN, aikDbgSent);
+    char buf[160];
+    int n = snprintf(buf, sizeof(buf), "%s st=%d n=%d s=%d\n", aikLastTrace, aikDbgSt, aikDbgN, aikDbgSent);
     if (n > 0)
         write(fd, buf, (size_t)n);
     close(fd);

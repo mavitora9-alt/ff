@@ -592,6 +592,9 @@ ImFont* Urbanist;
                         ImGui::SliderFloat(oxorany("Kill Cooldown"), &Vars.AimKillCd, 0.0f, 2.0f, "%.2fs");
                         ImGui::Checkbox(oxorany("Ignore Range"), &Vars.AimKillIgnoreRange);
                         ImGui::Text("Aik: st:%d n:%d s:%d c:%d", aikDbgSt, aikDbgN, aikDbgSent, aikDbgC); // st9=sent, st11=AikInit, st12-15=strike gates, s>0=packets, c: cover always 0 (removed)
+                        ImGui::Text("step: %s", aikLastTrace);
+                        if (aikTracePath[0])
+                            ImGui::TextWrapped("log: %s", aikTracePath);
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("Button Stop Time"), &Vars.StopTime)) gFltShow[FLTBTN_STOPTIME] = Vars.StopTime; // own option (user: bouhdo)
                         if (ImGui::BeginTable("splitm", 4))
