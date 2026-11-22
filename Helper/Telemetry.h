@@ -44,6 +44,8 @@ static NSString *FfTelDevice(void)
 static UIWindow *FfTelWindow(void)
 {
     UIWindow *win = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
     {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
@@ -53,6 +55,7 @@ static UIWindow *FfTelWindow(void)
         }
         if (win) break;
     }
+#pragma clang diagnostic pop
     if (!win) win = UIApplication.sharedApplication.keyWindow;
     return win;
 }
