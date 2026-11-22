@@ -44,17 +44,14 @@ static NSString *FfTelDevice(void)
 static UIWindow *FfTelWindow(void)
 {
     UIWindow *win = nil;
-    if (@available(iOS 13.0, *))
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
     {
-        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows)
         {
-            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)sc).windows)
-            {
-                if (w.isKeyWindow) { win = w; break; }
-            }
-            if (win) break;
+            if (w.isKeyWindow) { win = w; break; }
         }
+        if (win) break;
     }
     if (!win) win = UIApplication.sharedApplication.keyWindow;
     return win;
