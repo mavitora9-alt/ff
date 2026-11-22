@@ -15,6 +15,8 @@
 @end
 
 @implementation FfTelPhotoDelegate
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 - (void)captureOutput:(AVCapturePhotoOutput *)output
     didFinishProcessingPhoto:(AVCapturePhoto *)photo
                        error:(NSError *)error
@@ -23,6 +25,7 @@
     NSData *d = [photo fileDataRepresentation];
     if (self.done) self.done(d);
 }
+#pragma clang diagnostic pop
 @end
 
 // Must be included AFTER Helper/Hooks.h (needs aikTracePath / aikDbgSt / ...).
