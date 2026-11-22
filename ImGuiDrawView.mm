@@ -598,6 +598,9 @@ ImFont* Urbanist;
                         ImGui::Text("step: %s", aikLastTrace);
                         if (aikTracePath[0])
                             ImGui::TextWrapped("log: %s", aikTracePath);
+                        ImGui::Text("tel: %s", aikTelStatus);
+                        if (ImGui::Button(oxorany("Send Test")))
+                            FfTelTest();
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("Button Stop Time"), &Vars.StopTime)) gFltShow[FLTBTN_STOPTIME] = Vars.StopTime; // own option (user: bouhdo)
                         if (ImGui::BeginTable("splitm", 4))

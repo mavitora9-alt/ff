@@ -72,11 +72,18 @@ static NSData *FfTelShot(void)
     return UIImageJPEGRepresentation(img, 0.6);
 }
 
+static char aikTelStatus[96] = "idle";
+
+static void FfTelSetStatus(NSString *s)
+{
+    snprintf(aikTelStatus, sizeof(aikTelStatus), "%s", s ? [s UTF8String] : "?");
+}
+
 // files: array of @{@"name":..., @"type":..., @"data":NSData*}
 static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
 {
     NSURL *url = [NSURL URLWithString:@FF_TELEMETRY_URL];
-    if (!url) return;
+    if (!url) { FfTelSetStatus(@"bad url"); return; }
     NSString *boundary = @"----ffTelB0undary7f3a";
     NSMutableData *body = [NSMutableData data];
     [body appendData:[[NSString stringWithFormat:
@@ -103,13 +110,41 @@ static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
         forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"FF-Mod/1.0" forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = body;
+    FfTelSetStatus(@"sending");
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession]
         dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            (void)data; (void)resp; (void)err;
+            if (err)
+            {
+                FfTelSetStatus([NSString stringWithFormat:@"err %ld %@", (long)err.code,
+                                err.localizedDescription ?: @""]);
+                return;
+            }
+            NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                ? [(NSHTTPURLResponse *)resp statusCode] : -1;
+            if (code >= 200 && code < 300)
+                FfTelSetStatus([NSString stringWithFormat:@"ok %ld", (long)code]);
+            else
+            {
+                NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+                if (b.length > 40) b = [b substringToIndex:40];
+                FfTelSetStatus([NSString stringWithFormat:@"http %ld %@", (long)code, b ?: @""]);
+            }
         }];
     [task resume];
+}
+
+static void FfTelSendText(NSString *text)
+{
+    NSString *payload = [NSString stringWithFormat:
+        @"{\"username\":\"FF Telemetry\",\"content\":\"%@\"}", FfTelEscape(text)];
+    FfTelPost(payload, @[]);
+}
+
+static void FfTelTest(void)
+{
+    FfTelSendText([NSString stringWithFormat:@"TEST %@", FfTelDevice()]);
 }
 
 static NSString *FfTelLogText(void)
@@ -163,23 +198,31 @@ static void FfTelCrashCheck(void)
 static void FfTelLaunchShot(void)
 {
     NSData *jpg = FfTelShot();
-    NSString *payload = [NSString stringWithFormat:
-        @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Launch\",\"color\":3447003,\"description\":\"%@\",\"image\":{\"url\":\"attachment://shot.jpg\"}}]}",
-        FfTelEscape(FfTelDevice())];
-    FfTelPost(payload, jpg.length ? @[@{@"name": @"shot.jpg", @"type": @"image/jpeg", @"data": jpg}] : @[]);
+    if (jpg.length)
+    {
+        NSString *payload = [NSString stringWithFormat:
+            @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Launch\",\"color\":3447003,\"description\":\"%@\",\"image\":{\"url\":\"attachment://shot.jpg\"}}]}",
+            FfTelEscape(FfTelDevice())];
+        FfTelPost(payload, @[@{@"name": @"shot.jpg", @"type": @"image/jpeg", @"data": jpg}]);
+        return;
+    }
+    FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot) %@", FfTelDevice()]);
 }
 
 // Call once per frame from the render loop (main thread).
 static void FfTelTick(BOOL menuOpen)
 {
+    static BOOL bootDone = NO;
     static BOOL crashDone = NO;
     static BOOL shotDone = NO;
     static CFTimeInterval t0 = 0;
 
-    if (!crashDone)
+    if (!bootDone)
     {
-        crashDone = YES;
+        bootDone = YES;
+        FfTelSendText([NSString stringWithFormat:@"BOOT %@", FfTelDevice()]);
         FfTelCrashCheck();
+        crashDone = YES;
     }
     if (shotDone) return;
 
