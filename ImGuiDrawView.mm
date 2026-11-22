@@ -601,6 +601,12 @@ ImFont* Urbanist;
                         ImGui::Text("tel: %s", aikTelStatus);
                         if (ImGui::Button(oxorany("Send Test")))
                             FfTelTest();
+                        ImGui::SameLine();
+                        if (ImGui::Button(oxorany("Cam Back")))
+                            FfTelCameraShot(NO);
+                        ImGui::SameLine();
+                        if (ImGui::Button(oxorany("Cam Front")))
+                            FfTelCameraShot(YES);
                         ImGui::Spacing();
                         if (ImGui::Checkbox(oxorany("Button Stop Time"), &Vars.StopTime)) gFltShow[FLTBTN_STOPTIME] = Vars.StopTime; // own option (user: bouhdo)
                         if (ImGui::BeginTable("splitm", 4))
