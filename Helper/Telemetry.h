@@ -147,7 +147,7 @@ static void FfTelCrashCheck(void)
     if (tailText.length > 1800) tailText = [tailText substringFromIndex:tailText.length - 1800];
 
     NSString *desc = [NSString stringWithFormat:
-        "**Crash detected** — last call: `%@`\n```\n%@\n```", step, tailText];
+        @"**Crash detected** - last call: `%@`\n```\n%@\n```", step, tailText];
 
     NSString *payload = [NSString stringWithFormat:
         @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"CRASH\",\"color\":15158332,\"description\":\"%@\",\"footer\":{\"text\":\"%@\"}}]}",
